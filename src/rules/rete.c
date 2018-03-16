@@ -21,6 +21,8 @@
 #define HASH_NEQ 2488026869 // $neq
 #define HASH_MT 576092554 // $mt
 #define HASH_IMT 1472564215 // $imt
+#define HASH_IALL 3261766877 // $iall
+#define HASH_IANY 3379504400 // $iany
 #define HASH_EX 373481198 // $ex
 #define HASH_NEX 2605470202 // $nex
 #define HASH_OR 340911698 // $or
@@ -55,6 +57,10 @@ typedef struct all {
     unsigned int *expressions;
     unsigned short expressionsLength;
 } all;
+
+unsigned int firstEmptyEntry = 1;
+unsigned int lastEmptyEntry = MAX_HANDLES -1;
+char entriesInitialized = 0;
 
 static unsigned int validateAlgebra(char *rule);
 
@@ -305,14 +311,15 @@ static unsigned int copyValue(ruleset *tree,
     char temp;
     switch(type) {
         case JSON_EVENT_PROPERTY:
+        case JSON_EVENT_LOCAL_PROPERTY:
         case JSON_STATE_PROPERTY:
             right->value.property.nameHash = ref->nameHash;
             right->value.property.nameOffset = ref->nameOffset;
-            right->value.property.evaluateAsAlpha = ref->evaluateAsAlpha;
             right->value.property.idOffset = ref->idOffset;
             break;
         case JSON_STATE_IDIOM:
         case JSON_EVENT_IDIOM:
+        case JSON_EVENT_LOCAL_IDIOM:
             right->value.idiomOffset = idiomOffset;
             break;
         case JSON_STRING:
@@ -375,14 +382,17 @@ static unsigned char compareValue(ruleset *tree,
     char temp;
     switch(type) {
         case JSON_EVENT_PROPERTY:
+        case JSON_EVENT_LOCAL_PROPERTY:
         case JSON_STATE_PROPERTY:
-            if (right->value.property.nameOffset == ref->nameOffset &&
+            if (right->value.property.nameHash == ref->nameHash &&
+                right->value.property.nameOffset == ref->nameOffset &&
                 right->value.property.idOffset == ref->idOffset)
                 return 1;
 
             return 0;
         case JSON_STATE_IDIOM:
         case JSON_EVENT_IDIOM:
+        case JSON_EVENT_LOCAL_IDIOM:
             return 0;
         case JSON_STRING:
             {
@@ -457,6 +467,11 @@ static unsigned int validateReference(char *rule, unsigned char *referenceType) 
 
     if (hash != HASH_S) {
         *referenceType = JSON_EVENT_PROPERTY;
+
+        if (hash == HASH_M) {
+             *referenceType = JSON_EVENT_LOCAL_PROPERTY;
+        }
+
         result = readNextString(last, &first, &last, &hash);
         if (result != PARSE_OK) {
             return result;
@@ -532,7 +547,8 @@ static unsigned int validateIdiom(char *rule, unsigned char *idiomType) {
             }
 
             if (newIdiomType == JSON_EVENT_PROPERTY || newIdiomType == JSON_EVENT_IDIOM) {
-                if (*idiomType == JSON_STATE_PROPERTY || *idiomType == JSON_STATE_IDIOM) {
+                if (*idiomType == JSON_STATE_PROPERTY || *idiomType == JSON_STATE_IDIOM ||
+                    *idiomType == JSON_EVENT_LOCAL_PROPERTY || *idiomType == JSON_EVENT_LOCAL_PROPERTY) {
                     return ERR_UNEXPECTED_TYPE;
                 }
 
@@ -540,12 +556,22 @@ static unsigned int validateIdiom(char *rule, unsigned char *idiomType) {
             } 
 
             if (newIdiomType == JSON_STATE_PROPERTY || newIdiomType == JSON_STATE_IDIOM) {
-                if (*idiomType == JSON_EVENT_PROPERTY || *idiomType == JSON_EVENT_IDIOM) {
+                if (*idiomType == JSON_EVENT_PROPERTY || *idiomType == JSON_EVENT_IDIOM ||
+                    *idiomType == JSON_EVENT_LOCAL_PROPERTY || *idiomType == JSON_EVENT_LOCAL_IDIOM) {
                     return ERR_UNEXPECTED_TYPE;
                 }
 
                 *idiomType = JSON_STATE_IDIOM;
             }                    
+
+            if (newIdiomType == JSON_EVENT_LOCAL_PROPERTY || newIdiomType == JSON_EVENT_LOCAL_IDIOM) {
+                if (*idiomType == JSON_STATE_PROPERTY || *idiomType == JSON_STATE_IDIOM ||
+                    *idiomType == JSON_EVENT_PROPERTY || *idiomType == JSON_EVENT_PROPERTY) {
+                    return ERR_UNEXPECTED_TYPE;
+                }
+
+                *idiomType = JSON_EVENT_IDIOM;
+            }
 
             if (hash != HASH_L && hash != HASH_R) {
                 return ERR_UNEXPECTED_NAME;
@@ -595,6 +621,12 @@ static unsigned int validateExpression(char *rule) {
         case HASH_IMT:
             operator = OP_IMT;
             break;
+        case HASH_IALL:
+            operator = OP_IALL;
+            break;
+        case HASH_IANY:
+            operator = OP_IANY;
+            break;
         case HASH_LT:
             operator = OP_LT;
             break;
@@ -642,6 +674,11 @@ static unsigned int validateExpression(char *rule) {
     // Validating expression rValue
     result = readNextValue(last, &first, &last, &type);
     if (result != PARSE_OK) {
+        return result;
+    }
+
+    if (operator == OP_IALL || operator == OP_IANY) {
+        result = validateExpression(first);
         return result;
     }
 
@@ -805,8 +842,7 @@ static unsigned int linkAlpha(ruleset *tree,
         }
 
         parentBetaList[entry] = nextOffset;
-    }
-    else if (nextNode->value.a.operator == OP_NEX) {
+    } else if (nextNode->value.a.operator == OP_NEX) {
         result = ensureNextList(tree, parentAlpha);
         if (result != RULES_OK) {
             return result;
@@ -821,8 +857,7 @@ static unsigned int linkAlpha(ruleset *tree,
         }
 
         parentNextList[entry] = nextOffset;
-    }
-    else {
+    } else {
         result = ensureNextHashset(tree, parentAlpha);
         if (result != RULES_OK) {
             return result;
@@ -851,7 +886,6 @@ static unsigned int readReference(ruleset *tree, char *rule, unsigned char *idio
     *idiomType = JSON_EVENT_PROPERTY;
     
     ref->idOffset = 0;
-    ref->evaluateAsAlpha = 0;
     readNextName(rule, &first, &last, &hash);
     if (hash != HASH_S) {
         result = storeString(tree, first, &ref->idOffset, last - first); 
@@ -860,7 +894,7 @@ static unsigned int readReference(ruleset *tree, char *rule, unsigned char *idio
         }  
 
         if (hash == HASH_M) {
-            ref->evaluateAsAlpha = 1;
+            *idiomType = JSON_EVENT_LOCAL_PROPERTY;
         }
 
         readNextString(last, &first, &last, &hash);
@@ -877,8 +911,7 @@ static unsigned int readReference(ruleset *tree, char *rule, unsigned char *idio
             if (result != RULES_OK) {
                 return result;
             } 
-        }
-        else {
+        } else {
             readNextValue(last, &first, &last, &type);
             result = readNextName(first, &first, &last, &hash);
             while (result == PARSE_OK) {
@@ -974,6 +1007,10 @@ static unsigned int readIdiom(ruleset *tree, char *rule, unsigned char *idiomTyp
                 *idiomType = JSON_EVENT_IDIOM;  
             }
 
+            if (*idiomType != JSON_EVENT_IDIOM && (type == JSON_EVENT_LOCAL_PROPERTY || type == JSON_EVENT_LOCAL_IDIOM)) {
+                *idiomType = JSON_EVENT_LOCAL_IDIOM;  
+            }
+
             // newIdiom address might have changed after readIdiom
             newIdiom = &tree->idiomPool[*idiomOffset];
             switch (hash) {
@@ -1011,7 +1048,7 @@ static unsigned int findAlpha(ruleset *tree,
     
     readNextName(rule, &firstName, &lastName, &hash);
     readNextValue(lastName, &first, &last, &type);
-    if (type == JSON_OBJECT) {
+    if (type == JSON_OBJECT && operator != OP_IALL && operator != OP_IANY) {
         result = readIdiom(tree, first, &type, &idiomOffset, &ref);
         if (result != RULES_OK) {
             return result;
@@ -1026,9 +1063,11 @@ static unsigned int findAlpha(ruleset *tree,
             node *currentNode = &tree->nodePool[parentNext[entry]];
             if (currentNode->value.a.hash == hash && 
                 currentNode->value.a.operator == operator) {
-                if (compareValue(tree, &currentNode->value.a.right, first, last, &ref, type)) {
-                    *resultOffset = parentNext[entry];
-                    return RULES_OK;
+                if (operator != OP_IALL && operator != OP_IANY) {
+                    if (compareValue(tree, &currentNode->value.a.right, first, last, &ref, type)) {
+                        *resultOffset = parentNext[entry];
+                        return RULES_OK;
+                    }
                 }
             }
         }
@@ -1038,11 +1077,13 @@ static unsigned int findAlpha(ruleset *tree,
         parentNext = &tree->nextPool[parent->value.a.nextListOffset];
         for (entry = 0; parentNext[entry] != 0; ++entry) {
             node *currentNode = &tree->nodePool[parentNext[entry]];
-            if (currentNode->value.a.hash == hash&& 
+            if (currentNode->value.a.hash == hash && 
                 currentNode->value.a.operator == operator) {
-                if (compareValue(tree, &currentNode->value.a.right, first, last, &ref, type)) {
-                    *resultOffset = parentNext[entry];
-                    return RULES_OK;
+                if (operator != OP_IALL && operator != OP_IANY) {
+                    if (compareValue(tree, &currentNode->value.a.right, first, last, &ref, type)) {
+                        *resultOffset = parentNext[entry];
+                        return RULES_OK;
+                    }
                 }
             }
         }
@@ -1072,17 +1113,21 @@ static unsigned int findAlpha(ruleset *tree,
         type = JSON_IREGEX;
     }
 
-    result = copyValue(tree, &newAlpha->value.a.right, first, last, idiomOffset, &ref, type);
-    if (result != RULES_OK) {
-        return result;
-    }
-
-    if (type == JSON_EVENT_PROPERTY || type == JSON_EVENT_IDIOM) {
-        result = appendTerm(expr, *resultOffset);
+    if (operator == OP_IANY || operator == OP_IALL) {
+        newAlpha->value.a.right.type = JSON_NIL;
+    } else {
+        result = copyValue(tree, &newAlpha->value.a.right, first, last, idiomOffset, &ref, type);
         if (result != RULES_OK) {
             return result;
         }
-    } 
+
+        if (type == JSON_EVENT_PROPERTY || type == JSON_EVENT_IDIOM) {
+            result = appendTerm(expr, *resultOffset);
+            if (result != RULES_OK) {
+                return result;
+            }
+        } 
+    }
 
     return linkAlpha(tree, parentOffset, *resultOffset);
 }
@@ -1160,6 +1205,12 @@ static unsigned int createAlpha(ruleset *tree,
             break;
         case HASH_IMT:
             operator = OP_IMT;
+            break;
+        case HASH_IALL:
+            operator = OP_IALL;
+            break;
+        case HASH_IANY:
+            operator = OP_IANY;
             break;
         case HASH_LT:
             operator = OP_LT;
@@ -1245,6 +1296,55 @@ static unsigned int createAlpha(ruleset *tree,
         readNextValue(last, &first, &last, &type);
     }
     
+    if (operator == OP_IANY || operator == OP_IALL) {
+        unsigned int result = findAlpha(tree, parentOffset, operator, first, expr, newOffset);
+        if (result != RULES_OK) {
+            return result;
+        }   
+
+        unsigned int inner_offset = *newOffset;
+        readNextName(first, &first, &last, &hash);
+        readNextValue(last, &first, &last, &type);
+        result = createAlpha(tree, first, expr, nextOffset, &inner_offset);
+        if (result != RULES_OK) {
+            return result;
+        }
+
+        node *newAlpha = &tree->nodePool[inner_offset];
+        if (newAlpha->value.a.right.type != JSON_EVENT_PROPERTY && newAlpha->value.a.right.type != JSON_EVENT_IDIOM) {
+            return linkAlpha(tree, *newOffset, nextOffset);
+        } else {
+            // Functions that can execute in client or backend should follow this pattern
+            node *oldAlpha = &tree->nodePool[*newOffset];
+            idiom *newIdiom = NULL;
+            unsigned int idiomOffset = 0;
+            result = storeIdiom(tree, &newIdiom, &idiomOffset);
+            if (result != RULES_OK) {
+                return result;
+            }
+
+            oldAlpha->value.a.right.type = JSON_EVENT_IDIOM;
+            oldAlpha->value.a.right.value.idiomOffset = idiomOffset;
+
+            newIdiom->operator = newAlpha->value.a.operator;
+            newIdiom->right.type = newAlpha->value.a.right.type;
+            if (newAlpha->value.a.right.type == JSON_EVENT_IDIOM) {
+                newIdiom->right.value.idiomOffset = newAlpha->value.a.right.value.idiomOffset;
+            } else {
+                newIdiom->right.value.property.nameHash = newAlpha->value.a.right.value.property.nameHash;
+                newIdiom->right.value.property.nameOffset = newAlpha->value.a.right.value.property.nameOffset;
+                newIdiom->right.value.property.idOffset = newAlpha->value.a.right.value.property.idOffset;
+            }
+            newIdiom->left.type = JSON_EVENT_PROPERTY;
+            newIdiom->left.value.property.nameHash = newAlpha->value.a.hash;
+            newIdiom->left.value.property.nameOffset = newAlpha->nameOffset;
+            newIdiom->left.value.property.idOffset = 0;
+
+            expr->t.termsPointer[expr->termsLength - 1] = *newOffset;
+            return linkAlpha(tree, *newOffset, nextOffset);
+        }
+    }
+
     if (nextOffset == 0) {
         return findAlpha(tree, parentOffset, operator, first, expr, newOffset);
     } else {
@@ -1639,6 +1739,66 @@ static unsigned int fixupQueries(ruleset *tree, unsigned int actionOffset, char*
     return RULES_OK;
 }
 
+#ifdef _PRINT
+
+static void printActionNode(ruleset *tree, node *actionNode, int level) {
+    for (int i = 0; i < level; ++ i) {
+        printf("    ");
+    }
+
+    printf("-> action: name %s, count %d, cap %d, priority %d\n", 
+          &tree->stringPool[actionNode->nameOffset],
+          actionNode->value.c.count,
+          actionNode->value.c.cap,
+          actionNode->value.c.priority);
+}
+
+static void printBetaNode(ruleset *tree, node *betaNode, int level) {
+    for (int i = 0; i < level; ++ i) {
+        printf("    ");
+    }
+
+    printf("-> beta: name %s, not %d\n", &tree->stringPool[betaNode->nameOffset], betaNode->value.b.not);
+    node *currentNode = &tree->nodePool[betaNode->value.b.nextOffset];
+    if (currentNode->type == NODE_ACTION) {
+        printActionNode(tree, currentNode, level + 1);
+    } else {
+        printBetaNode(tree, currentNode, level + 1);
+    }
+}
+
+static void printAlphaNode(ruleset *tree, node *alphaNode, int level) {
+    for (int i = 0; i < level; ++ i) {
+        printf("    ");
+    }
+
+    printf("-> alpha: name %s, operator %x\n", &tree->stringPool[alphaNode->nameOffset], alphaNode->value.a.operator);
+    if (alphaNode->value.a.nextOffset) {
+        unsigned int *nextHashset = &tree->nextPool[alphaNode->value.a.nextOffset];
+        for (unsigned int entry = 0; entry < NEXT_BUCKET_LENGTH; ++entry) { 
+            if (nextHashset[entry]) {
+                printAlphaNode(tree, &tree->nodePool[nextHashset[entry]], level + 1);  
+            }
+        }  
+    }
+
+    if (alphaNode->value.a.nextListOffset) {
+        unsigned int *nextList = &tree->nextPool[alphaNode->value.a.nextListOffset];
+        for (unsigned int entry = 0; nextList[entry] != 0; ++entry) {
+            printAlphaNode(tree, &tree->nodePool[nextList[entry]], level + 1);
+        }
+    }
+
+    if (alphaNode->value.a.betaListOffset) {
+        unsigned int *betaList = &tree->nextPool[alphaNode->value.a.betaListOffset];
+        for (unsigned int entry = 0; betaList[entry] != 0; ++entry) {
+            printBetaNode(tree, &tree->nodePool[betaList[entry]], level + 1);
+        }
+    }
+}
+
+#endif
+
 static unsigned int createTree(ruleset *tree, char *rules) {
     char *first;
     char *last;
@@ -1683,12 +1843,11 @@ static unsigned int createTree(ruleset *tree, char *rules) {
         readNextValue(lastName, &first, &lastRuleValue, &type);
         ruleAction->value.c.priority = 0;
         ruleAction->value.c.count = 0;
-        ruleAction->value.c.span = 0;
         ruleAction->value.c.cap = 0;
         getSetting(HASH_PRI, first, &ruleAction->value.c.priority);
         getSetting(HASH_COUNT, first, &ruleAction->value.c.count);
         getSetting(HASH_CAP, first, &ruleAction->value.c.cap);
-        if (!ruleAction->value.c.count && !ruleAction->value.c.span && !ruleAction->value.c.cap) {
+        if (!ruleAction->value.c.count && !ruleAction->value.c.cap) {
             ruleAction->value.c.count = 1;
         }
 
@@ -1718,10 +1877,20 @@ static unsigned int createTree(ruleset *tree, char *rules) {
         result = readNextName(lastRuleValue, &firstName, &lastName, &hash);
     }
 
+#ifdef _PRINT
+    printAlphaNode(tree, &tree->nodePool[NODE_M_OFFSET], 0);
+#endif
+
     return RULES_OK;
 }
 
-unsigned int createRuleset(void **handle, char *name, char *rules, unsigned int stateCaheSize) {
+unsigned int createRuleset(unsigned int *handle, char *name, char *rules, unsigned int stateCaheSize) {
+    INITIALIZE_ENTRIES;
+
+#ifdef _PRINT
+    printf("%s\n", rules);
+#endif
+
     node *newNode;
     unsigned int stringOffset;
     unsigned int nodeOffset;
@@ -1803,15 +1972,17 @@ unsigned int createRuleset(void **handle, char *name, char *rules, unsigned int 
     newNode->type = NODE_ALPHA;
     newNode->value.a.operator = OP_END;
 
-    *handle = tree;
-
     // will use random numbers for state stored event mids
     srand(time(NULL));
+
+    CREATE_HANDLE(tree, handle);
     return createTree(tree, rules);
 }
 
-unsigned int deleteRuleset(void *handle) {
-    ruleset *tree = (ruleset*)(handle);
+unsigned int deleteRuleset(unsigned int handle) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     deleteBindingsList(tree);
     free(tree->nodePool);
     free(tree->nextPool);
@@ -1832,10 +2003,13 @@ unsigned int deleteRuleset(void *handle) {
     }
     free(tree->state);
     free(tree);
+    DELETE_HANDLE(handle);
     return RULES_OK;
 }
 
-unsigned int createClient(void **handle, char *name, unsigned int stateCaheSize) {
+unsigned int createClient(unsigned int *handle, char *name, unsigned int stateCaheSize) {
+    INITIALIZE_ENTRIES;
+
     ruleset *tree = malloc(sizeof(ruleset));
     if (!tree) {
         return ERR_OUT_OF_MEMORY;
@@ -1869,12 +2043,14 @@ unsigned int createClient(void **handle, char *name, unsigned int stateCaheSize)
         return result;
     }
 
-    *handle = tree;
+    CREATE_HANDLE(tree, handle);
     return RULES_OK;
 }
 
-unsigned int deleteClient(void *handle) {
-    ruleset *tree = (ruleset*)(handle);
+unsigned int deleteClient(unsigned int handle) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+    
     deleteBindingsList(tree);
     free(tree->stringPool);
     free(tree->stateBuckets);
@@ -1890,6 +2066,7 @@ unsigned int deleteClient(void *handle) {
     }
     
     free(tree);
+    DELETE_HANDLE(handle);
     return RULES_OK;
 }
 

@@ -175,7 +175,9 @@ static void insertSortProperties(jsonObject *jo, jsonProperty **properties) {
 }
 
 static void radixSortProperties(jsonObject *jo, jsonProperty **properties) {
-    unsigned char counts[43] = {};
+    unsigned char counts[43];
+    memset(counts, 0, 43 * sizeof(char));
+
     for (unsigned char i = 0; i < jo->propertiesLength; ++i) {
         unsigned char mostSignificant = jo->properties[i].hash / 100000000;
         ++counts[mostSignificant];
@@ -226,9 +228,9 @@ static void calculateId(jsonObject *jo) {
     }
 
 #ifdef _WIN32
-    sprintf_s(jo->idBuffer, sizeof(char) * 21, "%020llu", hash); 
+    sprintf_s(jo->idBuffer, sizeof(char) * ID_BUFFER_LENGTH, "$%020llu", hash); 
 #else
-    snprintf(jo->idBuffer, sizeof(char) * 21, "%020llu", hash);
+    snprintf(jo->idBuffer, sizeof(char) * ID_BUFFER_LENGTH, "$%020llu", hash);
 #endif
     jo->properties[jo->idIndex].valueLength = 20;
 }
@@ -331,10 +333,12 @@ unsigned int constructObject(char *root,
             switch (layout) {
                 case JSON_OBJECT_SEQUENCED:
                     property = &jo->properties[jo->propertiesLength];
-                    if (hash == HASH_ID) {
-                        jo->idIndex = jo->propertiesLength;
-                    } else if (hash == HASH_SID) {
-                        jo->sidIndex = jo->propertiesLength;
+                    if (!parentName) {
+                        if (hash == HASH_ID) {
+                            jo->idIndex = jo->propertiesLength;
+                        } else if (hash == HASH_SID) {
+                            jo->sidIndex = jo->propertiesLength;
+                        }
                     }
                     break;
                 case JSON_OBJECT_HASHED: 
@@ -344,10 +348,12 @@ unsigned int constructObject(char *root,
                         candidate = (candidate + 1) % MAX_OBJECT_PROPERTIES;
                     }
 
-                    if (hash == HASH_ID) {
-                        jo->idIndex = candidate;
-                    } else if (hash == HASH_SID) {
-                        jo->sidIndex = candidate;
+                    if (!parentName) {
+                        if (hash == HASH_ID) {
+                            jo->idIndex = candidate;
+                        } else if (hash == HASH_SID) {
+                            jo->sidIndex = candidate;
+                        }
                     }
 
                     property = &jo->properties[candidate];
@@ -497,19 +503,19 @@ static unsigned int resolveBindingAndEntry(ruleset *tree,
     return RULES_OK;
 }
 
-unsigned int resolveBinding(void *handle, 
+unsigned int resolveBinding(void *tree, 
                             char *sid, 
                             void **rulesBinding) {  
     stateEntry *entry = NULL;
-    return resolveBindingAndEntry(handle, sid, &entry, rulesBinding);
+    return resolveBindingAndEntry(tree, sid, &entry, rulesBinding);
 }
 
-unsigned int refreshState(void *handle, 
+unsigned int refreshState(void *tree, 
                           char *sid) {
     unsigned int result;
     stateEntry *entry = NULL;  
     void *rulesBinding;
-    result = resolveBindingAndEntry(handle, sid, &entry, &rulesBinding);
+    result = resolveBindingAndEntry(tree, sid, &entry, &rulesBinding);
     if (result != RULES_OK) {
         return result;
     }
@@ -579,13 +585,16 @@ unsigned int fetchStateProperty(void *tree,
     return RULES_OK;    
 }
 
-unsigned int getState(void *handle, char *sid, char **state) {
+unsigned int getState(unsigned int handle, char *sid, char **state) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     void *rulesBinding = NULL;
     if (!sid) {
         sid = "0";
     }
 
-    unsigned int result = resolveBinding(handle, sid, &rulesBinding);
+    unsigned int result = resolveBinding(tree, sid, &rulesBinding);
     if (result != RULES_OK) {
       return result;
     }
@@ -593,9 +602,9 @@ unsigned int getState(void *handle, char *sid, char **state) {
     return getSession(rulesBinding, sid, state);
 }
 
-unsigned int getStateVersion(void *handle, char *sid, unsigned long *stateVersion) {
+unsigned int getStateVersion(void *tree, char *sid, unsigned long *stateVersion) {
     void *rulesBinding = NULL;
-    unsigned int result = resolveBinding(handle, sid, &rulesBinding);
+    unsigned int result = resolveBinding(tree, sid, &rulesBinding);
     if (result != RULES_OK) {
       return result;
     }
@@ -604,17 +613,20 @@ unsigned int getStateVersion(void *handle, char *sid, unsigned long *stateVersio
 }
 
 
-unsigned int deleteState(void *handle, char *sid) {
+unsigned int deleteState(unsigned int handle, char *sid) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     if (!sid) {
         sid = "0";
     }
 
     void *rulesBinding = NULL;
-    unsigned int result = resolveBinding(handle, sid, &rulesBinding);
+    unsigned int result = resolveBinding(tree, sid, &rulesBinding);
     if (result != RULES_OK) {
       return result;
     }
 
     unsigned int sidHash = fnv1Hash32(sid, strlen(sid));
-    return deleteSession(handle, rulesBinding, sid, sidHash);
+    return deleteSession(tree, rulesBinding, sid, sidHash);
 }

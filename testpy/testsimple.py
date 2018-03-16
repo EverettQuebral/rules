@@ -200,6 +200,25 @@ with statechart('fraud8'):
         host.post('fraud8', {'id': 1, 'sid': 1, 'amount': 200})
 
 
+with ruleset('fraud9'):
+
+    @when_all(c.item << (m.item == 'txn') & (-m.fraud_status))
+    def flaggedFraud(c):
+        c.retract_fact(c.item)
+        c.item.fraud_status = 'flagged'
+        c.assert_fact(c.item)
+        
+    @when_all(c.item << +m.fraud_status)
+    def listFraud(c):
+        print("fraud9 {0} {1} is {2}".format(c.item.item,c.item.nmid,c.item.fraud_status))
+
+    @when_start
+    def start(host):
+        host.assert_fact("fraud9",{"item":"txn","nmid":"1"})
+        host.assert_fact("fraud9",{"item":"txn","nmid":"2"})
+        host.assert_fact("fraud9",{"item":"txn","nmid":"3","fraud_status":"under investigation"})
+
+
 with ruleset('test'):
     @when_all(c.first << +s.last,
               c.second << (m.id == c.first.last + 1) & (m.action == 'open'))
@@ -590,7 +609,7 @@ with statechart('a6'):
        
 
 with ruleset('a7'):
-    @when_all(m.amount < c.s.max_amount)
+    @when_all(m.amount < sref().max_amount)
     def approved(c):
         print ('a7 approved {0}'.format(c.m.amount))
 
@@ -602,7 +621,7 @@ with ruleset('a7'):
 
 
 with ruleset('a8'):
-    @when_all((m.amount < c.s.max_amount) & (m.amount > c.s.ref_id('global').min_amount))
+    @when_all((m.amount < sref().max_amount) & (m.amount > sref('global').min_amount))
     def approved(c):
         print ('a8 approved {0}'.format(c.m.amount))
 
@@ -615,7 +634,7 @@ with ruleset('a8'):
 
 
 with ruleset('a9'):
-    @when_all(m.amount < c.s.max_amount * 2)
+    @when_all(m.amount < sref().max_amount * 2)
     def approved(c):
         print ('a9 approved {0}'.format(c.m.amount))
 
@@ -627,7 +646,7 @@ with ruleset('a9'):
 
 
 with ruleset('a10'):
-    @when_all(m.amount < c.s.max_amount + c.s.ref_id('global').max_amount)
+    @when_all(m.amount < sref().max_amount + sref('global').max_amount)
     def approved(c):
         print ('a10 approved {0}'.format(c.m.amount))
 

@@ -935,7 +935,10 @@ class Flowchart(Ruleset):
 
 class Host(object):
 
-    def __init__(self, ruleset_definitions = None, databases = [{'host': 'localhost', 'port': 6379, 'password': None, 'db': 0}], state_cache_size = 1024):
+    def __init__(self, ruleset_definitions = None, databases = None, state_cache_size = 1024):
+        if not databases:
+            databases = [{'host': 'localhost', 'port': 6379, 'password': None, 'db': 0}]
+            
         self._ruleset_directory = {}
         self._ruleset_list = []
         self._databases = databases
@@ -1099,7 +1102,10 @@ class Host(object):
 
 class Queue(object):
 
-    def __init__(self, ruleset_name, database = {'host': 'localhost', 'port': 6379, 'password':None, 'db': 0}, state_cache_size = 1024):
+    def __init__(self, ruleset_name, database = None, state_cache_size = 1024):
+        if not database:
+            database = {'host': 'localhost', 'port': 6379, 'password':None, 'db': 0}
+
         self._ruleset_name = ruleset_name
         self._handle = rules.create_client(state_cache_size, ruleset_name)
         if isinstance(database, str):
@@ -1113,25 +1119,38 @@ class Queue(object):
 
             rules.bind_ruleset(database['port'], database['db'], database['host'], database['password'], self._handle)
         
+    def isClosed(self):
+        return self._handle == 0
 
     def post(self, message):
+        if self._handle == 0:
+            raise Exception('Queue has already been closed')
+
         if 'sid' in message:
             rules.queue_assert_event(self._handle, str(message['sid']), self._ruleset_name, json.dumps(message, ensure_ascii=False))
         else:
             rules.queue_assert_event(self._handle, None, self._ruleset_name, json.dumps(message, ensure_ascii=False))
 
     def assert_fact(self, message):
+        if self._handle == 0:
+            raise Exception('Queue has already been closed')
+
         if 'sid' in message:
             rules.queue_assert_fact(self._handle, str(message['sid']), self._ruleset_name, json.dumps(message, ensure_ascii=False))
         else: 
             rules.queue_assert_fact(self._handle, None, self._ruleset_name, json.dumps(message, ensure_ascii=False))
 
     def retract_fact(self, message):
+        if self._handle == 0:
+            raise Exception('Queue has already been closed')
+
         if 'sid' in message:
             rules.queue_retract_fact(self._handle, str(message['sid']), self._ruleset_name, json.dumps(message, ensure_ascii=False))
         else:
             rules.queue_retract_fact(self._handle, None, self._ruleset_name, json.dumps(message, ensure_ascii=False))
 
     def close(self):
-        rules.delete_client(self._handle)
+        if self._handle != 0:
+            rules.delete_client(self._handle)
+            self._handle = 0
 

@@ -37,13 +37,15 @@
 #define OP_STRING_DOUBLE 0x0103
 #define OP_STRING_STRING 0x0101
 #define OP_STRING_NIL 0x0107
-#define OP_STRING_REGEX 0x010C
-#define OP_STRING_IREGEX 0x010D
+#define OP_STRING_REGEX 0x010E
+#define OP_STRING_IREGEX 0x010F
 #define OP_NIL_BOOL 0x0704
 #define OP_NIL_INT 0x0702
 #define OP_NIL_DOUBLE 0x0703
 #define OP_NIL_STRING 0x0701
 #define OP_NIL_NIL 0x0707
+
+#define HASH_I 1622948014 //$i
 
 typedef struct actionContext {
     void *rulesBinding;
@@ -430,7 +432,7 @@ static unsigned int valueToProperty(ruleset *tree,
     unsigned int result = RULES_OK;
     *releaseState = 0;
     switch(sourceValue->type) {
-        case JSON_EVENT_IDIOM:
+        case JSON_EVENT_LOCAL_IDIOM:
         case JSON_STATE_IDIOM:
             result = reduceIdiom(tree, 
                                  sid, 
@@ -442,20 +444,16 @@ static unsigned int valueToProperty(ruleset *tree,
                                  targetProperty);
 
             return result;
-        case JSON_EVENT_PROPERTY:
-            if (!sourceValue->value.property.evaluateAsAlpha) {
-                return ERR_IGNORE_PROPERTY;
-            } else {
-                for (unsigned short i = 0; i < messageObject->propertiesLength; ++i) {
-                    if (sourceValue->value.property.nameHash == messageObject->properties[i].hash) {
-                        *targetProperty = &messageObject->properties[i];
-                        rehydrateProperty(*targetProperty, message);
-                        return RULES_OK;
-                    } 
-                }
-
-                return ERR_PROPERTY_NOT_FOUND;
+        case JSON_EVENT_LOCAL_PROPERTY:
+            for (unsigned short i = 0; i < messageObject->propertiesLength; ++i) {
+                if (sourceValue->value.property.nameHash == messageObject->properties[i].hash) {
+                    *targetProperty = &messageObject->properties[i];
+                    rehydrateProperty(*targetProperty, message);
+                    return RULES_OK;
+                } 
             }
+
+            return ERR_PROPERTY_NOT_FOUND;
         case JSON_STATE_PROPERTY:
             if (sourceValue->value.property.idOffset) {
                 sid = &tree->stringPool[sourceValue->value.property.idOffset];
@@ -731,13 +729,12 @@ static unsigned int isMatch(ruleset *tree,
     unsigned char alphaOp = currentAlpha->operator;
     unsigned char propertyType = currentProperty->type;
     unsigned int result = RULES_OK;
-    
     *propertyMatch = 0;
     if (alphaOp == OP_EX) {
         *propertyMatch = 1;
         return RULES_OK;
     }
-    
+
     rehydrateProperty(currentProperty, message);
     jsonProperty rightValue;
     jsonProperty *rightProperty = &rightValue;
@@ -818,10 +815,10 @@ static unsigned int isMatch(ruleset *tree,
             }
             break;
         case OP_DOUBLE_BOOL:
-            *propertyMatch = compareDouble(currentProperty->value.i, rightProperty->value.b, alphaOp);
+            *propertyMatch = compareDouble(currentProperty->value.d, rightProperty->value.b, alphaOp);
             break;
         case OP_DOUBLE_INT: 
-            *propertyMatch = compareDouble(currentProperty->value.i, rightProperty->value.i, alphaOp);
+            *propertyMatch = compareDouble(currentProperty->value.d, rightProperty->value.i, alphaOp);
             break;
         case OP_DOUBLE_DOUBLE: 
             *propertyMatch = compareDouble(currentProperty->value.d, rightProperty->value.d, alphaOp);
@@ -933,6 +930,142 @@ static unsigned int isMatch(ruleset *tree,
     return result;
 }
 
+static unsigned int isArrayMatch(ruleset *tree,
+                                 char *sid,
+                                 char *message,
+                                 jsonObject *messageObject,
+                                 jsonProperty *currentProperty,
+                                 alpha *arrayAlpha,
+                                 unsigned char *propertyMatch,
+                                 void **rulesBinding) {
+    *propertyMatch = 0;
+    unsigned int result = RULES_OK;
+    if (currentProperty->type != JSON_ARRAY) {
+        return RULES_OK;
+    }
+
+    char *first = currentProperty->valueString;
+    char *last;
+    unsigned char type;
+    jsonObject jo;
+    result = readNextArrayValue(first, &first, &last, &type);
+    while (result == PARSE_OK) {
+        unsigned short top = 1;
+        alpha *stack[MAX_STACK_SIZE];
+        stack[0] = arrayAlpha;
+        alpha *currentAlpha;
+        if (type == JSON_OBJECT) {
+            char *next;
+            jo.propertiesLength = 0;
+            result = constructObject(first,
+                                     "$i", 
+                                     NULL, 
+                                     JSON_OBJECT_SEQUENCED, 
+                                     0,
+                                     &jo, 
+                                     &next);
+            if (result != RULES_OK) {
+                return result;
+            }
+        } else {
+            jo.propertiesLength = 1;
+            jo.properties[0].hash = HASH_I;
+            jo.properties[0].type = type;
+            jo.properties[0].isMaterial = 0;
+            jo.properties[0].valueString = first;
+            jo.properties[0].valueLength = last - first;
+            jo.properties[0].nameLength = 2;
+            strcpy(jo.properties[0].name, "$i");
+        }
+
+        while (top) {
+            --top;
+            currentAlpha = stack[top];
+            if (currentAlpha->nextListOffset) {
+                unsigned int *nextList = &tree->nextPool[currentAlpha->nextListOffset];
+                for (unsigned int entry = 0; nextList[entry] != 0; ++entry) {
+                    node *listNode = &tree->nodePool[nextList[entry]];
+                    char exists = 0;
+                    for(unsigned int propertyIndex = 0; propertyIndex < jo.propertiesLength; ++propertyIndex) {
+                        if (listNode->value.a.hash == jo.properties[propertyIndex].hash) {
+                            exists = 1;
+                            break;
+                        }
+                    }
+
+                    if (!exists) {
+                        if (top == MAX_STACK_SIZE) {
+                            return ERR_MAX_STACK_SIZE;
+                        }
+                        
+                        stack[top] = &listNode->value.a; 
+                        ++top;
+                    }
+                }
+            }
+
+            if (currentAlpha->nextOffset) {
+                unsigned int *nextHashset = &tree->nextPool[currentAlpha->nextOffset];
+                for(unsigned int propertyIndex = 0; propertyIndex < jo.propertiesLength; ++propertyIndex) {
+                    jsonProperty *currentProperty = &jo.properties[propertyIndex];
+                    for (unsigned int entry = currentProperty->hash & HASH_MASK; nextHashset[entry] != 0; entry = (entry + 1) % NEXT_BUCKET_LENGTH) {
+                        node *hashNode = &tree->nodePool[nextHashset[entry]];
+                        if (currentProperty->hash == hashNode->value.a.hash) {
+                            unsigned char match = 0;
+                            if (hashNode->value.a.operator == OP_IALL || hashNode->value.a.operator == OP_IANY) {
+                                result = isArrayMatch(tree, 
+                                                      sid, 
+                                                      message,
+                                                      messageObject,
+                                                      currentProperty, 
+                                                      &hashNode->value.a,
+                                                      &match,
+                                                      rulesBinding);
+                            } else {
+                                result = isMatch(tree,
+                                                 sid,
+                                                 message,
+                                                 messageObject,
+                                                 currentProperty,
+                                                 &hashNode->value.a,
+                                                 &match,
+                                                 rulesBinding);
+                            }
+
+                            if (result != RULES_OK) {
+                                return result;
+                            }
+
+                            if (match) {
+                                if (top == MAX_STACK_SIZE) {
+                                    return ERR_MAX_STACK_SIZE;
+                                }
+
+                                stack[top] = &hashNode->value.a; 
+                                ++top;
+                            }
+                        }
+                    }               
+                }
+            }
+
+            if ((currentAlpha->betaListOffset || !currentAlpha->nextOffset) && currentAlpha != arrayAlpha) {
+                *propertyMatch = 1;
+                break;
+            }
+        }
+        
+        if ((arrayAlpha->operator == OP_IALL && !*propertyMatch) ||
+            (arrayAlpha->operator == OP_IANY && *propertyMatch)) {
+            break;
+        }
+
+        result = readNextArrayValue(last, &first, &last, &type);   
+    }
+
+    return (result == PARSE_END ? RULES_OK: result);
+}
+
 static unsigned int handleAlpha(ruleset *tree, 
                                 char *sid, 
                                 char *mid,
@@ -945,7 +1078,7 @@ static unsigned int handleAlpha(ruleset *tree,
                                 char **addKeys,
                                 unsigned int *addCount,
                                 char **removeCommand,
-                                void **rulesBinding) {
+                                void **rulesBinding) {                        
     unsigned int result = ERR_EVENT_NOT_HANDLED;
     unsigned short top = 1;
     unsigned int entry;
@@ -985,8 +1118,17 @@ static unsigned int handleAlpha(ruleset *tree,
                 for (entry = currentProperty->hash & HASH_MASK; nextHashset[entry] != 0; entry = (entry + 1) % NEXT_BUCKET_LENGTH) {
                     node *hashNode = &tree->nodePool[nextHashset[entry]];
                     if (currentProperty->hash == hashNode->value.a.hash) {
-                        unsigned char match = 0;
-                        unsigned int mresult = isMatch(tree, 
+                        if (hashNode->value.a.right.type == JSON_EVENT_PROPERTY || hashNode->value.a.right.type == JSON_EVENT_IDIOM) {
+                            if (top == MAX_STACK_SIZE) {
+                                return ERR_MAX_STACK_SIZE;
+                            }
+                            stack[top] = &hashNode->value.a; 
+                            ++top;
+                        } else {
+                            unsigned char match = 0;
+                            unsigned int mresult = RULES_OK;
+                            if (hashNode->value.a.operator == OP_IALL || hashNode->value.a.operator == OP_IANY) {
+                                mresult = isArrayMatch(tree, 
                                                        sid, 
                                                        message,
                                                        jo,
@@ -994,16 +1136,29 @@ static unsigned int handleAlpha(ruleset *tree,
                                                        &hashNode->value.a,
                                                        &match,
                                                        rulesBinding);
-                        if (mresult != RULES_OK && mresult != ERR_IGNORE_PROPERTY){
-                            return mresult;
-                        }
-                        if (match || mresult == ERR_IGNORE_PROPERTY) {
-                            if (top == MAX_STACK_SIZE) {
-                                return ERR_MAX_STACK_SIZE;
+                            } else {
+                                mresult = isMatch(tree, 
+                                                  sid, 
+                                                  message,
+                                                  jo,
+                                                  currentProperty, 
+                                                  &hashNode->value.a,
+                                                  &match,
+                                                  rulesBinding);
                             }
 
-                            stack[top] = &hashNode->value.a; 
-                            ++top;
+                            if (mresult != RULES_OK){
+                                return mresult;
+                            }
+
+                            if (match) {
+                                if (top == MAX_STACK_SIZE) {
+                                    return ERR_MAX_STACK_SIZE;
+                                }
+
+                                stack[top] = &hashNode->value.a; 
+                                ++top;
+                            }
                         }
                     }
                 }
@@ -1275,7 +1430,7 @@ static unsigned int handleMessage(ruleset *tree,
                             rulesBinding);
 }
 
-static unsigned int handleMessages(void *handle, 
+static unsigned int handleMessages(ruleset *tree, 
                                    unsigned char actionType,
                                    char *messages, 
                                    char **commands,
@@ -1309,7 +1464,7 @@ static unsigned int handleMessages(void *handle,
 
         lastTemp = *last;
         *last = '\0';
-        result = handleMessageCore(handle,
+        result = handleMessageCore(tree,
                                  NULL, 
                                  first, 
                                  &jo, 
@@ -1373,12 +1528,12 @@ static unsigned int handleState(ruleset *tree,
     return result;
 }
 
-static unsigned int handleTimers(void *handle, 
+static unsigned int handleTimers(ruleset *tree, 
                                  char **commands,
                                  unsigned int *commandCount,
                                  void **rulesBinding) {
     redisReply *reply;
-    unsigned int result = peekTimers(handle, rulesBinding, &reply);
+    unsigned int result = peekTimers(tree, rulesBinding, &reply);
     if (result != RULES_OK) {
         return result;
     }
@@ -1410,7 +1565,7 @@ static unsigned int handleTimers(void *handle,
 
         commands[*commandCount] = command;
         ++*commandCount;
-        result = handleMessage(handle, 
+        result = handleMessage(tree, 
                                NULL,
                                reply->element[i]->str + 2, 
                                action,
@@ -1427,14 +1582,14 @@ static unsigned int handleTimers(void *handle,
     return RULES_OK;
 }
 
-static unsigned int startHandleMessage(void *handle, 
+static unsigned int startHandleMessage(ruleset *tree, 
                                        char *message, 
                                        unsigned char actionType,
                                        void **rulesBinding,
                                        unsigned int *replyCount) {
     char *commands[MAX_COMMAND_COUNT];
     unsigned int commandCount = 0;
-    unsigned int result = handleMessage(handle, 
+    unsigned int result = handleMessage(tree, 
                                         NULL,
                                         message, 
                                         actionType, 
@@ -1454,13 +1609,13 @@ static unsigned int startHandleMessage(void *handle,
     return result;
 }
 
-static unsigned int executeHandleMessage(void *handle, 
+static unsigned int executeHandleMessage(ruleset *tree, 
                                          char *message, 
                                          unsigned char actionType) {
     char *commands[MAX_COMMAND_COUNT];
     unsigned int commandCount = 0;
     void *rulesBinding = NULL;
-    unsigned int result = handleMessage(handle, 
+    unsigned int result = handleMessage(tree, 
                                         NULL,
                                         message, 
                                         actionType, 
@@ -1480,14 +1635,14 @@ static unsigned int executeHandleMessage(void *handle,
     return result;
 }
 
-static unsigned int startHandleMessages(void *handle, 
+static unsigned int startHandleMessages(ruleset *tree, 
                                         char *messages, 
                                         unsigned char actionType,
                                         void **rulesBinding,
                                         unsigned int *replyCount) {
     char *commands[MAX_COMMAND_COUNT];
     unsigned int commandCount = 0;
-    unsigned int result = handleMessages(handle,
+    unsigned int result = handleMessages(tree,
                                          actionType,
                                          messages,
                                          commands,
@@ -1506,13 +1661,13 @@ static unsigned int startHandleMessages(void *handle,
     return result;
 }
 
-static unsigned int executeHandleMessages(void *handle, 
+static unsigned int executeHandleMessages(ruleset *tree, 
                                           char *messages, 
                                           unsigned char actionType) {
     char *commands[MAX_COMMAND_COUNT];
     unsigned int commandCount = 0;
     void *rulesBinding = NULL;
-    unsigned int result = handleMessages(handle,
+    unsigned int result = handleMessages(tree,
                                          actionType,
                                          messages,
                                          commands,
@@ -1540,85 +1695,127 @@ unsigned int complete(void *rulesBinding, unsigned int replyCount) {
     return RULES_OK;
 }
 
-unsigned int assertEvent(void *handle, char *message) {
-    return executeHandleMessage(handle, message, ACTION_ASSERT_EVENT);
+unsigned int assertEvent(unsigned int handle, char *message) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return executeHandleMessage(tree, message, ACTION_ASSERT_EVENT);
 }
 
-unsigned int startAssertEvent(void *handle, 
+unsigned int startAssertEvent(unsigned int handle, 
                              char *message, 
                              void **rulesBinding, 
                              unsigned int *replyCount) {
-    return startHandleMessage(handle, message, ACTION_ASSERT_EVENT, rulesBinding, replyCount);
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return startHandleMessage(tree, message, ACTION_ASSERT_EVENT, rulesBinding, replyCount);
 }
 
-unsigned int assertEvents(void *handle, 
+unsigned int assertEvents(unsigned int handle, 
                           char *messages) {
-    return executeHandleMessages(handle, messages, ACTION_ASSERT_EVENT);
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return executeHandleMessages(tree, messages, ACTION_ASSERT_EVENT);
 }
 
-unsigned int startAssertEvents(void *handle, 
+unsigned int startAssertEvents(unsigned int handle, 
                               char *messages, 
                               void **rulesBinding, 
                               unsigned int *replyCount) {
-    return startHandleMessages(handle, messages, ACTION_ASSERT_EVENT, rulesBinding, replyCount);
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return startHandleMessages(tree, messages, ACTION_ASSERT_EVENT, rulesBinding, replyCount);
 }
 
-unsigned int retractEvent(void *handle, char *message) {
-    return executeHandleMessage(handle, message, ACTION_REMOVE_EVENT);
+unsigned int retractEvent(unsigned int handle, char *message) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return executeHandleMessage(tree, message, ACTION_REMOVE_EVENT);
 }
 
-unsigned int startAssertFact(void *handle, 
+unsigned int startAssertFact(unsigned int handle, 
                              char *message, 
                              void **rulesBinding, 
                              unsigned int *replyCount) {
-    return startHandleMessage(handle, message, ACTION_ASSERT_FACT, rulesBinding, replyCount);
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return startHandleMessage(tree, message, ACTION_ASSERT_FACT, rulesBinding, replyCount);
 }
 
-unsigned int assertFact(void *handle, char *message) {
-    return executeHandleMessage(handle, message, ACTION_ASSERT_FACT);
+unsigned int assertFact(unsigned int handle, char *message) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return executeHandleMessage(tree, message, ACTION_ASSERT_FACT);
 }
 
-unsigned int startAssertFacts(void *handle, 
-                              char *messages, 
-                             void **rulesBinding, 
-                             unsigned int *replyCount) {
-    return startHandleMessages(handle, messages, ACTION_ASSERT_FACT, rulesBinding, replyCount);
-}
-
-unsigned int assertFacts(void *handle, 
-                          char *messages) {
-    return executeHandleMessages(handle, messages, ACTION_ASSERT_FACT);
-}
-
-unsigned int retractFact(void *handle, char *message) {
-    return executeHandleMessage(handle, message, ACTION_REMOVE_FACT);
-}
-
-unsigned int startRetractFact(void *handle, 
-                             char *message, 
-                             void **rulesBinding, 
-                             unsigned int *replyCount) {
-    return startHandleMessage(handle, message, ACTION_REMOVE_FACT, rulesBinding, replyCount);
-}
-
-unsigned int retractFacts(void *handle, 
-                          char *messages) {
-    return executeHandleMessages(handle, messages, ACTION_REMOVE_FACT);
-}
-
-unsigned int startRetractFacts(void *handle, 
+unsigned int startAssertFacts(unsigned int handle, 
                               char *messages, 
                               void **rulesBinding, 
                               unsigned int *replyCount) {
-    return startHandleMessages(handle, messages, ACTION_REMOVE_FACT, rulesBinding, replyCount);
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return startHandleMessages(tree, messages, ACTION_ASSERT_FACT, rulesBinding, replyCount);
 }
 
-unsigned int assertState(void *handle, char *sid, char *state) {
+unsigned int assertFacts(unsigned int handle, 
+                         char *messages) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return executeHandleMessages(tree, messages, ACTION_ASSERT_FACT);
+}
+
+unsigned int retractFact(unsigned int handle, char *message) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return executeHandleMessage(tree, message, ACTION_REMOVE_FACT);
+}
+
+unsigned int startRetractFact(unsigned int handle, 
+                             char *message, 
+                             void **rulesBinding, 
+                             unsigned int *replyCount) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return startHandleMessage(tree, message, ACTION_REMOVE_FACT, rulesBinding, replyCount);
+}
+
+unsigned int retractFacts(unsigned int handle, 
+                          char *messages) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return executeHandleMessages(tree, messages, ACTION_REMOVE_FACT);
+}
+
+unsigned int startRetractFacts(unsigned int handle, 
+                              char *messages, 
+                              void **rulesBinding, 
+                              unsigned int *replyCount) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
+    return startHandleMessages(tree, messages, ACTION_REMOVE_FACT, rulesBinding, replyCount);
+}
+
+unsigned int assertState(unsigned int handle, char *sid, char *state) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     char *commands[MAX_COMMAND_COUNT];
     unsigned int commandCount = 0;
     void *rulesBinding = NULL;
 
-    unsigned int result = handleState(handle, 
+    unsigned int result = handleState(tree, 
                                       state, 
                                       commands,
                                       &commandCount,
@@ -1636,11 +1833,14 @@ unsigned int assertState(void *handle, char *sid, char *state) {
     return result;
 }
 
-unsigned int assertTimers(void *handle) {
+unsigned int assertTimers(unsigned int handle) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     char *commands[MAX_COMMAND_COUNT];
     unsigned int commandCount = 0;
     void *rulesBinding = NULL;
-    unsigned int result = handleTimers(handle, 
+    unsigned int result = handleTimers(tree, 
                                        commands,
                                        &commandCount,
                                        &rulesBinding);
@@ -1657,14 +1857,17 @@ unsigned int assertTimers(void *handle) {
     return RULES_OK;
 }
 
-unsigned int startAction(void *handle, 
+unsigned int startAction(unsigned int handle, 
                          char **state, 
                          char **messages, 
                          void **actionHandle,
                          void **actionBinding) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     redisReply *reply;
     void *rulesBinding;
-    unsigned int result = peekAction(handle, &rulesBinding, &reply);
+    unsigned int result = peekAction(tree, &rulesBinding, &reply);
     if (result != RULES_OK) {
         return result;
     }
@@ -1683,15 +1886,18 @@ unsigned int startAction(void *handle,
     return RULES_OK;
 }
 
-unsigned int startUpdateState(void *handle, 
+unsigned int startUpdateState(unsigned int handle, 
                               void *actionHandle, 
                               char *state,
                               void **rulesBinding,
                               unsigned int *replyCount) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     char *commands[MAX_COMMAND_COUNT];
     unsigned int result = RULES_OK;
     unsigned int commandCount = 0;
-    result = handleState(handle, 
+    result = handleState(tree, 
                          state,
                          commands,
                          &commandCount,
@@ -1707,9 +1913,12 @@ unsigned int startUpdateState(void *handle,
 
 }
 
-unsigned int completeAction(void *handle, 
+unsigned int completeAction(unsigned int handle, 
                             void *actionHandle, 
                             char *state) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     char *commands[MAX_COMMAND_COUNT];
     unsigned int commandCount = 0;
     actionContext *context = (actionContext*)actionHandle;
@@ -1725,7 +1934,7 @@ unsigned int completeAction(void *handle,
     }
 
     ++commandCount;
-    result = handleState(handle, 
+    result = handleState(tree, 
                          state,
                          commands,
                          &commandCount,
@@ -1747,7 +1956,7 @@ unsigned int completeAction(void *handle,
     return RULES_OK;
 }
 
-unsigned int completeAndStartAction(void *handle, 
+unsigned int completeAndStartAction(unsigned int handle, 
                                     unsigned int expectedReplies,
                                     void *actionHandle, 
                                     char **messages) {
@@ -1804,19 +2013,22 @@ unsigned int completeAndStartAction(void *handle,
     return RULES_OK;
 }
 
-unsigned int abandonAction(void *handle, void *actionHandle) {
+unsigned int abandonAction(unsigned int handle, void *actionHandle) {
     freeReplyObject(((actionContext*)actionHandle)->reply);
     free(actionHandle);
     return RULES_OK;
 }
 
-unsigned int queueMessage(void *handle, unsigned int queueAction, char *sid, char *destination, char *message) {
+unsigned int queueMessage(unsigned int handle, unsigned int queueAction, char *sid, char *destination, char *message) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     void *rulesBinding;
     if (!sid) {
         sid = "0";
     }
 
-    unsigned int result = resolveBinding(handle, sid, &rulesBinding);
+    unsigned int result = resolveBinding(tree, sid, &rulesBinding);
     if (result != RULES_OK) {
         return result;
     }
@@ -1824,13 +2036,16 @@ unsigned int queueMessage(void *handle, unsigned int queueAction, char *sid, cha
     return registerMessage(rulesBinding, queueAction, destination, message);
 }
 
-unsigned int startTimer(void *handle, char *sid, unsigned int duration, char manualReset, char *timer) {
+unsigned int startTimer(unsigned int handle, char *sid, unsigned int duration, char manualReset, char *timer) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     void *rulesBinding;
     if (!sid) {
         sid = "0";
     }
     
-    unsigned int result = resolveBinding(handle, sid, &rulesBinding);
+    unsigned int result = resolveBinding(tree, sid, &rulesBinding);
     if (result != RULES_OK) {
         return result;
     }
@@ -1838,13 +2053,16 @@ unsigned int startTimer(void *handle, char *sid, unsigned int duration, char man
     return registerTimer(rulesBinding, duration, manualReset, timer);
 }
 
-unsigned int cancelTimer(void *handle, char *sid, char *timerName) {
+unsigned int cancelTimer(unsigned int handle, char *sid, char *timerName) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     void *rulesBinding;
     if (!sid) {
         sid = "0";
     }
 
-    unsigned int result = resolveBinding(handle, sid, &rulesBinding);
+    unsigned int result = resolveBinding(tree, sid, &rulesBinding);
     if (result != RULES_OK) {
         return result;
     }
@@ -1852,13 +2070,16 @@ unsigned int cancelTimer(void *handle, char *sid, char *timerName) {
     return removeTimer(rulesBinding, timerName);
 }
 
-unsigned int renewActionLease(void *handle, char *sid) {
+unsigned int renewActionLease(unsigned int handle, char *sid) {
+    ruleset *tree;
+    RESOLVE_HANDLE(handle, &tree);
+
     void *rulesBinding;
     if (!sid) {
         sid = "0";
     }
 
-    unsigned int result = resolveBinding(handle, sid, &rulesBinding);
+    unsigned int result = resolveBinding(tree, sid, &rulesBinding);
     if (result != RULES_OK) {
         return result;
     }

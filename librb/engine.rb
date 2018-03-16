@@ -768,6 +768,8 @@ module Engine
       reflexive_states = {}
 
       for state_name, state in chart_definition do
+        next if state_name == "$type"
+
         qualified_name = state_name.to_s
         qualified_name = "#{parent_name}.#{state_name}" if parent_name
         start_state[qualified_name] = true
@@ -783,6 +785,8 @@ module Engine
       end
 
       for state_name, state in chart_definition do
+        next if state_name == "$type"
+        
         qualified_name = state_name.to_s
         qualified_name = "#{parent_name}.#{state_name}" if parent_name
 
@@ -962,6 +966,8 @@ module Engine
       end
 
       for stage_name, stage in chart_definition do
+        next if stage_name == "$type"
+
         from_stage = nil
         if reflexive_stages.key? stage_name
           from_stage = stage_name
@@ -1320,7 +1326,7 @@ module Engine
 
   class Queue
 
-    def initialize(ruleset_name, database = {:host => 'localhost', :port => 6379, :password => nil, :db => 0}, state_cache_size = 1024)
+    def initialize(ruleset_name, database = {:host => "localhost", :port => 6379, :password => nil, :db => 0}, state_cache_size = 1024)
       @_ruleset_name = ruleset_name.to_s
       @handle = Rules.create_client @_ruleset_name, state_cache_size
       if database.kind_of? String
@@ -1330,23 +1336,42 @@ module Engine
       end
     end
 
+    def isClosed()
+      @handle == 0
+    end
+
     def post(message)
+      if @handle == 0
+        raise "Queue has already been closed"
+      end
+
       sid = (message.key? :sid) ? message[:sid]: message['sid']
       Rules.queue_assert_event @handle, sid.to_s, @_ruleset_name, JSON.generate(message)
     end
 
     def assert(message)
+      if @handle == 0
+        raise "Queue has already been closed"
+      end
+
       sid = (message.key? :sid) ? message[:sid]: message['sid']
       Rules.queue_assert_fact @handle, sid.to_s, @_ruleset_name, JSON.generate(message)
     end
 
     def retract(message)
+      if @handle == 0
+        raise "Queue has already been closed"
+      end
+
       sid = (message.key? :sid) ? message[:sid]: message['sid']
       Rules.queue_retract_fact @handle, sid.to_s, @_ruleset_name, JSON.generate(message)
     end
 
     def close()
-      Rules.delete_client @handle
+      if @handle != 0
+        Rules.delete_client @handle
+        @handle = 0
+      end
     end
   end
 

@@ -22,6 +22,8 @@
 #define OP_NOT 0x13
 #define OP_MT 0x14
 #define OP_IMT 0x15
+#define OP_IALL 0x16
+#define OP_IANY 0x17
 
 #define NODE_ALPHA 0
 #define NODE_BETA_CONNECTOR 1
@@ -32,7 +34,6 @@ typedef struct reference {
     unsigned int nameHash;
     unsigned int nameOffset;
     unsigned int idOffset;
-    char evaluateAsAlpha;
 } reference;
 
 typedef struct regexReference {
@@ -94,7 +95,6 @@ typedef struct betaConnector {
 
 typedef struct action {
     unsigned int index;
-    unsigned short span;
     unsigned short count;
     unsigned short cap;
     unsigned short priority;
